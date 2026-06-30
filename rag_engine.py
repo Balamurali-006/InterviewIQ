@@ -247,6 +247,8 @@ class PlacementRAG:
                         self.collection.add(ids=list(n_ids), documents=list(n_docs), metadatas=list(n_metas))
                     
                     self._loaded_files.add(file_key)
+                    import time
+                    time.sleep(0.1)  # Yield CPU to keep the web server responsive
                 except Exception as e:
                     print(f"Error loading file {file_path.name} for {company}: {e}")
 
