@@ -1,3 +1,13 @@
+---
+title: InterviewIQ - CIT PlacementGPT
+emoji: 🎯
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # 🎯 CIT PlacementGPT Assistant
 
 A premium, ChatGPT-style web application for CIT (Coimbatore Institute of Technology) students to prepare for placements using a local knowledge base of seniors' interview feedback and live external web-scraped feedback.
