@@ -1,0 +1,11 @@
+.venv/
+.git/
+chroma_db/
+chat_history.db
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.vscode/
+.idea/
