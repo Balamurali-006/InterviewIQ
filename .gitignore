@@ -1,0 +1,27 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache & compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment secrets
+.env
+
+# Local SQLite databases (dynamic runtime data)
+*.db
+chat_history.db
+
+# ChromaDB local index (re-built on start/re-index)
+chroma_db/
+
+# OS/IDE settings
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
