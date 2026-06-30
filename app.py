@@ -175,8 +175,17 @@ def run_migration():
 # Run file migration to organize PDFs by company subdirectory
 run_migration()
 
-# Index knowledge base contents
-rag.load_knowledge_base()
+# Index knowledge base contents asynchronously in the background so it doesn't block startup
+import threading
+def bg_load():
+    try:
+        print("Starting background knowledge base indexing...")
+        rag.load_knowledge_base()
+        print("Background indexing complete!")
+    except Exception as e:
+        print(f"Error in background indexing: {e}")
+
+threading.Thread(target=bg_load, daemon=True).start()
 
 # Static files directory structure
 static_dir = Path("static")
