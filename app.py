@@ -136,8 +136,20 @@ app = FastAPI(title="CIT Placement Assistant")
 # Init DB
 init_db()
 
-# Init RAG
-rag = PlacementRAG()
+# Init RAG (Lazy Loader)
+import threading
+rag = None
+rag_lock = threading.Lock()
+
+def get_rag():
+    global rag
+    if rag is None:
+        with rag_lock:
+            if rag is None:
+                print("Initializing RAG engine (loading sentence-transformers)...")
+                rag = PlacementRAG()
+                print("RAG engine initialized successfully!")
+    return rag
 
 def run_migration():
     pdf_dir = Path("pdfs")
@@ -149,7 +161,7 @@ def run_migration():
             kb_dir.mkdir(parents=True, exist_ok=True)
             for pdf_path in pdf_files:
                 try:
-                    text = rag.extract_text_from_pdf(str(pdf_path))
+                    text = get_rag().extract_text_from_pdf(str(pdf_path))
                     company = extract_company_name_from_text(text, pdf_path.name)
                     
                     company_folder = kb_dir / company
@@ -172,15 +184,15 @@ def run_migration():
             except Exception as e:
                 print(f"Error cleaning up empty pdf folders: {e}")
 
-# Run file migration to organize PDFs by company subdirectory
-run_migration()
-
 # Index knowledge base contents asynchronously in the background so it doesn't block startup
-import threading
 def bg_load():
     try:
+        # Run file migration to organize PDFs by company subdirectory in the background
+        run_migration()
+        # Initialize RAG engine in background
+        rag_instance = get_rag()
         print("Starting background knowledge base indexing...")
-        rag.load_knowledge_base()
+        rag_instance.load_knowledge_base()
         print("Background indexing complete!")
     except Exception as e:
         print(f"Error in background indexing: {e}")
@@ -260,7 +272,7 @@ def post_query(req: QueryRequest):
     if not session_exists:
         create_session(session_id=current_session_id)
         
-    answer = rag.query(req.question, company=req.company, settings=req.settings)
+    answer = get_rag().query(req.question, company=req.company, settings=req.settings)
     
     add_message(current_session_id, "user", req.question, req.company)
     updated_title = add_message(current_session_id, "assistant", answer, req.company)
@@ -294,22 +306,22 @@ async def upload_files(
         except Exception as e:
             print(f"Error saving uploaded file {file.filename}: {e}")
             
-    rag.load_knowledge_base()
+    get_rag().load_knowledge_base()
     
     return {
         "status": "success",
         "company": company_cleaned,
         "files": saved_files,
-        "total_documents": rag.get_doc_count()
+        "total_documents": get_rag().get_doc_count()
     }
 
 @app.post("/api/reindex")
 def post_reindex():
-    rag.rebuild_database()
+    get_rag().rebuild_database()
     return {
         "status": "success",
-        "total_documents": rag.get_doc_count(),
-        "companies": sorted(list(rag.company_names))
+        "total_documents": get_rag().get_doc_count(),
+        "companies": sorted(list(get_rag().company_names))
     }
 
 @app.post("/api/scrape")
@@ -398,12 +410,12 @@ def post_scrape(req: ScrapeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save scraped feedback: {e}")
         
-    rag.load_knowledge_base()
+    get_rag().load_knowledge_base()
     
     return {
         "status": "success",
         "company": company,
         "filename": "web_scraped_feedback.md",
         "results_count": total_results,
-        "total_documents": rag.get_doc_count()
+        "total_documents": get_rag().get_doc_count()
     }
