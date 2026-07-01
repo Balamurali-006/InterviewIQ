@@ -1,6 +1,6 @@
 // ── State Management ──
 let activeSessionId = null;
-let activeCompany = null;
+let activeCompany = null; // Tracks the current active context (null = All / picker state)
 let companiesList = [];
 let sessionsList = [];
 let llmSettings = {
@@ -10,8 +10,18 @@ let llmSettings = {
     api_url: '',
     serper_api_key: ''
 };
+let currentUser = null;
 
 // ── DOM Elements ──
+const loginScreen = document.getElementById('loginScreen');
+const appContainer = document.getElementById('appContainer');
+const loginEmail = document.getElementById('loginEmail');
+const loginPassword = document.getElementById('loginPassword');
+const loginError = document.getElementById('loginError');
+const loginBtn = document.getElementById('loginBtn');
+const userEmailDisplay = document.getElementById('userEmailDisplay');
+const logoutBtn = document.getElementById('logoutBtn');
+
 const sidebar = document.getElementById('sidebar');
 const menuToggle = document.getElementById('menuToggle');
 const newChatBtn = document.getElementById('newChatBtn');
@@ -21,6 +31,12 @@ const companySearch = document.getElementById('companySearch');
 const activeCompanyBadge = document.getElementById('activeCompanyBadge');
 const resetContextBtn = document.getElementById('resetContextBtn');
 const chatWindow = document.getElementById('chatWindow');
+
+// Welcome containers
+const companyPickerContainer = document.getElementById('companyPickerContainer');
+const companyPickerGrid = document.getElementById('companyPickerGrid');
+const companyPickerGreeting = document.getElementById('companyPickerGreeting');
+const pickerSearch = document.getElementById('pickerSearch');
 const welcomeContainer = document.getElementById('welcomeContainer');
 const messagesContainer = document.getElementById('messagesContainer');
 const chatInput = document.getElementById('chatInput');
@@ -59,12 +75,85 @@ const uploadStatusText = document.getElementById('uploadStatusText');
 document.addEventListener('DOMContentLoaded', () => {
     loadSettings();
     initializeEventListeners();
-    loadSessions(true); // Loads sessions and auto-selects the first one
-    loadCompanies();
+    checkAuth();
 });
+
+// ── Auth Check ──
+async function checkAuth() {
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+        showLoginScreen();
+        return;
+    }
+
+    try {
+        const res = await fetch('/api/auth/me', {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.status === 200) {
+            currentUser = await res.json();
+            showAppScreen();
+        } else {
+            logout();
+        }
+    } catch (e) {
+        console.error('Auth verification failed:', e);
+        showLoginScreen();
+    }
+}
+
+function showLoginScreen() {
+    loginScreen.classList.remove('hidden');
+    appContainer.classList.add('hidden');
+}
+
+function showAppScreen() {
+    loginScreen.classList.add('hidden');
+    appContainer.classList.remove('hidden');
+    
+    // Display Username (Email Prefix)
+    const emailPrefix = currentUser.email.split('@')[0];
+    userEmailDisplay.textContent = emailPrefix;
+    companyPickerGreeting.textContent = `👋 Hi ${emailPrefix}, where are you interviewing?`;
+    
+    loadSessions(true);
+    loadCompanies();
+}
+
+function logout() {
+    localStorage.removeItem('auth_token');
+    currentUser = null;
+    showLoginScreen();
+}
+
+// ── Authenticated API Wrapper ──
+async function apiFetch(url, options = {}) {
+    const token = localStorage.getItem('auth_token');
+    if (!options.headers) options.headers = {};
+    if (token) {
+        options.headers['Authorization'] = `Bearer ${token}`;
+    }
+    
+    const res = await fetch(url, options);
+    if (res.status === 401) {
+        showToast('Session expired. Please log in again.');
+        logout();
+        throw new Error('Unauthorized');
+    }
+    return res;
+}
 
 // ── Event Listeners ──
 function initializeEventListeners() {
+    // Login Button
+    loginBtn.addEventListener('click', handleLogin);
+    loginPassword.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleLogin();
+    });
+
+    // Logout Button
+    logoutBtn.addEventListener('click', logout);
+
     // Mobile Sidebar Toggle
     menuToggle.addEventListener('click', () => {
         sidebar.classList.toggle('active');
@@ -73,7 +162,7 @@ function initializeEventListeners() {
     // Close sidebar if clicking outside on mobile
     document.addEventListener('click', (e) => {
         if (window.innerWidth <= 768) {
-            if (!sidebar.contains(e.target) && !menuToggle.contains(e.target) && sidebar.classList.contains('active')) {
+            if (sidebar && !sidebar.contains(e.target) && !menuToggle.contains(e.target) && sidebar.classList.contains('active')) {
                 sidebar.classList.remove('active');
             }
         }
@@ -92,17 +181,24 @@ function initializeEventListeners() {
         filterCompanies(e.target.value);
     });
 
+    // Company Picker Search
+    pickerSearch.addEventListener('input', (e) => {
+        filterPickerCompanies(e.target.value);
+    });
+
     // Input Textarea Autogrow & Keybindings
     chatInput.addEventListener('input', () => {
         chatInput.style.height = 'auto';
         chatInput.style.height = (chatInput.scrollHeight) + 'px';
-        sendBtn.disabled = !chatInput.value.trim();
+        sendBtn.disabled = !chatInput.value.trim() || activeCompany === null;
     });
 
     chatInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendMessage();
+            if (activeCompany !== null) {
+                sendMessage();
+            }
         }
     });
 
@@ -110,7 +206,6 @@ function initializeEventListeners() {
 
     // ── Settings Modal Events ──
     openSettingsBtn.addEventListener('click', () => {
-        // Populate inputs with current settings
         llmProvider.value = llmSettings.provider;
         llmApiKey.value = llmSettings.api_key;
         llmModel.value = llmSettings.model;
@@ -138,7 +233,6 @@ function initializeEventListeners() {
 
     // ── Upload Modal Events ──
     openUploadBtn.addEventListener('click', () => {
-        // Populate upload company dropdown
         uploadCompanySelect.innerHTML = '<option value="">-- Create New Folder / Choose --</option>';
         companiesList.forEach(company => {
             const opt = document.createElement('option');
@@ -187,6 +281,45 @@ function initializeEventListeners() {
     startUploadBtn.addEventListener('click', handleUpload);
 }
 
+// ── Login Handler ──
+async function handleLogin() {
+    const email = loginEmail.value.trim();
+    const password = loginPassword.value;
+    
+    loginError.textContent = '';
+    
+    if (!email || !password) {
+        loginError.textContent = 'Please fill in all fields.';
+        return;
+    }
+
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Verifying...';
+
+    try {
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        
+        if (res.status === 200) {
+            localStorage.setItem('auth_token', data.access_token);
+            currentUser = data.user;
+            showAppScreen();
+        } else {
+            loginError.textContent = data.detail || 'Login failed.';
+        }
+    } catch (e) {
+        loginError.textContent = 'Could not connect to authentication server.';
+        console.error(e);
+    } finally {
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Login →';
+    }
+}
+
 // ── LLM Settings Helper ──
 function loadSettings() {
     const saved = localStorage.getItem('llm_settings');
@@ -221,7 +354,7 @@ function toggleSettingsFields() {
 // ── Fetch & Render Sessions ──
 async function loadSessions(selectFirst = false) {
     try {
-        const res = await fetch('/api/history');
+        const res = await apiFetch('/api/history');
         const sessions = await res.json();
         sessionsList = sessions;
         renderSessions();
@@ -266,26 +399,38 @@ function renderSessions() {
 
 async function selectSession(sessionId) {
     activeSessionId = sessionId;
-    // Highlight active session
     document.querySelectorAll('.session-item').forEach(el => {
         el.classList.toggle('active', el.dataset.id === sessionId);
     });
 
     try {
-        const res = await fetch(`/api/history/${sessionId}`);
+        const res = await apiFetch(`/api/history/${sessionId}`);
         const data = await res.json();
         
         messagesContainer.innerHTML = '';
         if (data.messages && data.messages.length > 0) {
+            // Find context from last user message or default
+            let lastCompany = null;
+            for (let i = data.messages.length - 1; i >= 0; i--) {
+                if (data.messages[i].role === 'user' && data.messages[i].company) {
+                    lastCompany = data.messages[i].company;
+                    break;
+                }
+            }
+            setCompanyContext(lastCompany, false); // select context but don't clear list
+            
+            companyPickerContainer.style.display = 'none';
             welcomeContainer.style.display = 'none';
             messagesContainer.style.display = 'flex';
+            
             data.messages.forEach(msg => {
                 appendMessageBubble(msg.role, msg.content, msg.company);
             });
+            enableChatInput();
         } else {
-            welcomeContainer.style.display = 'flex';
-            messagesContainer.style.display = 'none';
-            generateSuggestedQuestions();
+            // New chat session
+            setCompanyContext(null, false);
+            showCompanyPicker();
         }
         scrollToBottom();
     } catch (e) {
@@ -295,14 +440,13 @@ async function selectSession(sessionId) {
 
 async function createNewSession() {
     try {
-        const res = await fetch('/api/history/new', {
+        const res = await apiFetch('/api/history/new', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
         });
         const newSession = await res.json();
         activeSessionId = newSession.id;
         
-        // Add to the front of list
         sessionsList.unshift(newSession);
         renderSessions();
         selectSession(newSession.id);
@@ -318,7 +462,7 @@ async function createNewSession() {
 async function deleteSession(sessionId) {
     if (!confirm('Are you sure you want to delete this chat session?')) return;
     try {
-        await fetch(`/api/history/${sessionId}`, { method: 'DELETE' });
+        await apiFetch(`/api/history/${sessionId}`, { method: 'DELETE' });
         
         sessionsList = sessionsList.filter(s => s.id !== sessionId);
         renderSessions();
@@ -338,11 +482,11 @@ async function deleteSession(sessionId) {
 // ── Fetch & Render Companies ──
 async function loadCompanies() {
     try {
-        const res = await fetch('/api/companies');
+        const res = await apiFetch('/api/companies');
         const data = await res.json();
         companiesList = data.companies;
         renderCompanies();
-        generateSuggestedQuestions();
+        renderCompanyPickerGrid();
     } catch (e) {
         console.error('Error loading companies:', e);
     }
@@ -388,10 +532,75 @@ function renderCompanies() {
     });
 }
 
-function setCompanyContext(company) {
+// ── Company Picker Rendering ──
+function showCompanyPicker() {
+    companyPickerContainer.style.display = 'flex';
+    welcomeContainer.style.display = 'none';
+    messagesContainer.style.display = 'none';
+    
+    // Disable text area until company selected
+    chatInput.placeholder = "Select a company from the list above first...";
+    chatInput.disabled = true;
+    sendBtn.disabled = true;
+    pickerSearch.value = '';
+    filterPickerCompanies('');
+}
+
+function renderCompanyPickerGrid() {
+    companyPickerGrid.innerHTML = '';
+    
+    // All Companies Card
+    const allCard = document.createElement('div');
+    allCard.className = 'picker-card all-card';
+    allCard.innerHTML = `
+        <div class="picker-card-logo">🔍</div>
+        <div class="picker-card-name">All Companies</div>
+        <div class="picker-card-desc">Search information across all CIT seniors' experiences</div>
+    `;
+    allCard.addEventListener('click', () => {
+        setCompanyContext(null);
+    });
+    companyPickerGrid.appendChild(allCard);
+
+    companiesList.forEach(company => {
+        const card = document.createElement('div');
+        card.className = 'picker-card';
+        card.dataset.name = company;
+        card.innerHTML = `
+            <div class="picker-card-logo">🏢</div>
+            <div class="picker-card-name">${escapeHtml(company)}</div>
+            <div class="picker-card-desc">Prepare for ${escapeHtml(company)} placement rounds</div>
+        `;
+        card.addEventListener('click', () => {
+            setCompanyContext(company);
+        });
+        companyPickerGrid.appendChild(card);
+    });
+}
+
+function filterPickerCompanies(query) {
+    const term = query.toLowerCase();
+    document.querySelectorAll('.company-picker-grid .picker-card').forEach(el => {
+        const name = el.dataset.name;
+        if (!name) return; // Keep "All Companies"
+        if (name.toLowerCase().includes(term)) {
+            el.style.display = 'flex';
+        } else {
+            el.style.display = 'none';
+        }
+    });
+}
+
+function enableChatInput() {
+    chatInput.disabled = false;
+    chatInput.placeholder = `Message PlacementGPT about ${activeCompany || 'All Companies'}...`;
+    sendBtn.disabled = !chatInput.value.trim();
+}
+
+function setCompanyContext(company, renderWelcome = true) {
     activeCompany = company;
     
-    // Update active UI highlights
+    // Update sidebar highlights
     document.querySelectorAll('.company-item').forEach(el => {
         if (company === null) {
             el.classList.toggle('active', !el.dataset.name);
@@ -408,8 +617,16 @@ function setCompanyContext(company) {
         activeCompanyBadge.textContent = 'All Companies';
         resetContextBtn.style.display = 'none';
     }
+    
+    // Enable the input fields
+    enableChatInput();
 
-    generateSuggestedQuestions();
+    if (renderWelcome) {
+        companyPickerContainer.style.display = 'none';
+        welcomeContainer.style.display = 'flex';
+        messagesContainer.style.display = 'none';
+        generateSuggestedQuestions();
+    }
     
     if (window.innerWidth <= 768) {
         sidebar.classList.remove('active');
@@ -464,7 +681,6 @@ function appendMessageBubble(role, content, companyContext = null) {
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
     
-    // Parse Markdown to HTML
     if (role === 'assistant') {
         bubble.innerHTML = marked.parse(content);
         
@@ -493,7 +709,6 @@ function appendMessageBubble(role, content, companyContext = null) {
             }
         });
 
-        
         // Add copy button
         const actionsDiv = document.createElement('div');
         actionsDiv.className = 'message-actions';
@@ -539,7 +754,7 @@ function appendMessageBubble(role, content, companyContext = null) {
                 showToast(`Searching web for ${activeCompany} feedback...`);
                 try {
                     const serperKey = serperApiKeyInput.value.trim() || llmSettings.serper_api_key;
-                    const res = await fetch('/api/scrape', {
+                    const res = await apiFetch('/api/scrape', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -552,7 +767,6 @@ function appendMessageBubble(role, content, companyContext = null) {
                     if (res.status === 200) {
                         showToast(`Successfully indexed web feedback for ${activeCompany}!`);
                         
-                        // Automatically query the chat with a summary request
                         chatInput.value = `Summarize the web feedback (Glassdoor, AmbitionBox, GeeksforGeeks) for ${activeCompany}`;
                         chatInput.style.height = 'auto';
                         chatInput.style.height = (chatInput.scrollHeight) + 'px';
@@ -575,7 +789,6 @@ function appendMessageBubble(role, content, companyContext = null) {
     } else {
         bubble.textContent = content;
         
-        // If there was a specific company context used, add a subtle tag
         if (companyContext) {
             const contextTag = document.createElement('span');
             contextTag.style.display = 'block';
@@ -622,7 +835,7 @@ function removeTypingIndicator() {
 // ── Sending Message ──
 async function sendMessage() {
     const text = chatInput.value.trim();
-    if (!text) return;
+    if (!text || activeCompany === null) return;
 
     if (!activeSessionId) {
         await createNewSession();
@@ -635,7 +848,6 @@ async function sendMessage() {
     // Append user message
     appendMessageBubble('user', text, activeCompany);
     
-    // Clear input
     chatInput.value = '';
     chatInput.style.height = 'auto';
     sendBtn.disabled = true;
@@ -652,7 +864,7 @@ async function sendMessage() {
             settings: (llmSettings.api_key || llmSettings.api_url) ? llmSettings : null
         };
 
-        const res = await fetch('/api/query', {
+        const res = await apiFetch('/api/query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -664,7 +876,6 @@ async function sendMessage() {
         if (data.answer) {
             appendMessageBubble('assistant', data.answer);
             
-            // Check if we need to update session title in sidebar
             const session = sessionsList.find(s => s.id === activeSessionId);
             if (session && session.title !== data.session_title) {
                 session.title = data.session_title;
@@ -724,13 +935,16 @@ async function handleUpload() {
     startUploadBtn.disabled = true;
 
     try {
+        const token = localStorage.getItem('auth_token');
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/upload', true);
+        if (token) {
+            xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        }
 
-        // Upload progress listener
         xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
-                const percent = Math.round((e.loaded / e.total) * 80) + 10; // Reserve 10% for backend processing
+                const percent = Math.round((e.loaded / e.total) * 80) + 10;
                 uploadProgressBar.style.width = `${percent}%`;
             }
         };
@@ -740,7 +954,6 @@ async function handleUpload() {
                 uploadProgressBar.style.width = '100%';
                 uploadStatusText.textContent = 'Re-indexed and saved successfully!';
                 
-                // Refresh lists
                 await loadCompanies();
                 
                 setTimeout(() => {
@@ -748,6 +961,10 @@ async function handleUpload() {
                     startUploadBtn.disabled = false;
                     showToast(`Successfully uploaded ${files.length} document(s) for ${company}!`);
                 }, 1000);
+            } else if (xhr.status === 401) {
+                logout();
+                uploadModal.classList.remove('active');
+                startUploadBtn.disabled = false;
             } else {
                 throw new Error(xhr.responseText || 'Upload failed');
             }
@@ -782,23 +999,13 @@ function escapeHtml(unsafe) {
 
 function showToast(message) {
     const toast = document.createElement('div');
-    toast.style.position = 'fixed';
-    toast.style.bottom = '20px';
-    toast.style.left = '20px';
-    toast.style.background = 'rgba(99, 102, 241, 0.95)';
-    toast.style.color = '#fff';
-    toast.style.padding = '10px 20px';
-    toast.style.borderRadius = '8px';
-    toast.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-    toast.style.zIndex = '999';
-    toast.style.fontSize = '0.9rem';
-    toast.style.backdropFilter = 'blur(4px)';
+    toast.className = 'toast-notification';
     toast.textContent = message;
     
     document.body.appendChild(toast);
     setTimeout(() => {
         toast.style.opacity = '0';
-        toast.style.transition = 'opacity 0.5s ease';
+        toast.style.transform = 'translateY(10px)';
         setTimeout(() => toast.remove(), 500);
     }, 3000);
 }
@@ -814,7 +1021,7 @@ async function triggerCompanyScrape(company, button) {
     showToast(`Scraping web feedback for ${company}...`);
     try {
         const serperKey = serperApiKeyInput.value.trim() || llmSettings.serper_api_key;
-        const res = await fetch('/api/scrape', {
+        const res = await apiFetch('/api/scrape', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -826,11 +1033,8 @@ async function triggerCompanyScrape(company, button) {
         
         if (res.status === 200) {
             showToast(`Successfully indexed web feedback for ${company}!`);
-            
-            // Set company context to this company
             setCompanyContext(company);
             
-            // Automatically prompt the chat
             chatInput.value = `Summarize the web feedback (Glassdoor, AmbitionBox, GeeksforGeeks) for ${company}`;
             chatInput.style.height = 'auto';
             chatInput.style.height = (chatInput.scrollHeight) + 'px';
