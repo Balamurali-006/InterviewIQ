@@ -327,8 +327,9 @@ def login(req: LoginRequest):
             detail="Access restricted to AI&DS Students only. Your email is not authorized."
         )
 
-    # Password must equal "71762308001"
-    if password != "71762308001":
+    # Password must equal their roll number (email prefix)
+    expected_password = email.split('@')[0]
+    if password != expected_password:
         raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
 
     # Auto-create user on first login
